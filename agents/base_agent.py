@@ -93,7 +93,7 @@ class BaseAgent(ABC):
 
         # Realized P&L from closed trades
         for trade in self.trades:
-            if trade["profit_loss"]:
+            if trade.get("profit_loss"):
                 total_pnl += trade["profit_loss"]
 
         # TODO: Add unrealized P&L from open positions
