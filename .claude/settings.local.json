@@ -4,7 +4,9 @@
       "Bash(git remote set-url:*)",
       "Bash(git add:*)",
       "Bash(python:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(git tag:*)",
+      "Skill(superpowers:using-git-worktrees)"
     ],
     "deny": [],
     "ask": []
