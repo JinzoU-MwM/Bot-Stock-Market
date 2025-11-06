@@ -17,3 +17,9 @@ yfinance==0.2.38
 matplotlib==3.9.3
 cryptography>=43.0.0
 packaging>=24.1
+
+# Reinforcement Learning Dependencies
+torch>=2.0.0
+gymnasium>=0.26.0
+torchvision>=0.15.0
+stable-baselines3>=2.0.0

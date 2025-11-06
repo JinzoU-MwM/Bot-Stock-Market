@@ -1,10 +1,15 @@
 # rl/environment.py
-import gym
-from gym import spaces
+try:
+    import gymnasium as gym
+    from gymnasium import spaces
+except ImportError:
+    import gym
+    from gym import spaces
 import numpy as np
 from typing import Dict, Any, Tuple
 import uuid
 import logging
+from .vectorization import state_vectorizer, action_vectorizer
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +24,10 @@ class TradingEnvironment(gym.Env):
         self.current_step = 0
         self.max_steps = 1000
 
+        # Use shared vectorization utilities
+        self.state_vectorizer = state_vectorizer
+        self.action_vectorizer = action_vectorizer
+
         # Action space: [action_type, position_size]
         # action_type: 0=HOLD, 1=BUY, 2=SELL
         # position_size: 0.0 to 1.0 (fraction of max position size)
@@ -26,11 +35,11 @@ class TradingEnvironment(gym.Env):
             low=np.array([0.0, 0.0]), high=np.array([2.0, 1.0]), dtype=np.float32
         )
 
-        # State space (simplified for now)
+        # State space using consistent dimensions from vectorizer
         self.observation_space = spaces.Box(
             low=-np.inf,
             high=np.inf,
-            shape=(20,),  # Will expand as needed
+            shape=(self.state_vectorizer.state_dim,),  # Use consistent state dimension
             dtype=np.float32,
         )
 
@@ -71,41 +80,14 @@ class TradingEnvironment(gym.Env):
         return next_state, reward, done, info
 
     def _get_current_state(self):
-        """Get current state representation"""
+        """Get current state representation using shared vectorizer"""
         market_data = self.market_data_service.calculate_technical_indicators(
             self.current_symbol
         )
         state_dict = self.agent.get_state(self.current_symbol, market_data)
 
-        # Convert dict to numpy array for RL model
-        state_vector = [
-            state_dict["cash_balance"] / self.agent.initial_capital,
-            state_dict["total_pnl"] / self.agent.initial_capital,
-            state_dict["available_margin"] / self.agent.initial_capital,
-            len(state_dict["positions"]),
-            state_dict["rsi"] / 100.0 if state_dict["rsi"] else 0.5,
-            state_dict["macd"] / 1.0 if state_dict["macd"] else 0.0,
-            state_dict["bollinger_position"]
-            if state_dict["bollinger_position"]
-            else 0.5,
-            state_dict["atr"] / 100.0 if state_dict["atr"] else 0.0,
-            state_dict["volume_ratio"] / 10.0 if state_dict["volume_ratio"] else 1.0,
-            state_dict["market_volatility"],
-            state_dict["hour_of_day"] / 24.0,
-            state_dict["day_of_week"] / 7.0,
-            # One-hot encoding for market session
-            1.0 if state_dict["market_session"] == "us" else 0.0,
-            1.0 if state_dict["market_session"] == "asia" else 0.0,
-            1.0 if state_dict["market_session"] == "europe" else 0.0,
-            # Strategy type encoding
-            1.0 if self.agent.strategy_type == "conservative" else 0.0,
-            1.0 if self.agent.strategy_type == "aggressive" else 0.0,
-            1.0 if self.agent.strategy_type == "balanced" else 0.0,
-            1.0 if self.agent.strategy_type == "trend" else 0.0,
-            1.0 if self.agent.strategy_type == "mean_reversion" else 0.0,
-        ]
-
-        return np.array(state_vector, dtype=np.float32)
+        # Use shared vectorizer for consistent state representation
+        return self.state_vectorizer.state_dict_to_vector(state_dict)
 
     def _execute_action(self, action_type, position_size):
         """Execute trading action and calculate reward"""

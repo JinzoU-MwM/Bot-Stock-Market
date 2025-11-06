@@ -8,6 +8,7 @@ from typing import List, Dict, Any, Tuple
 import uuid
 from datetime import datetime
 import logging
+from .vectorization import state_vectorizer, action_vectorizer
 
 logger = logging.getLogger(__name__)
 
@@ -45,10 +46,14 @@ class PolicyNetwork(nn.Module):
 
 
 class RLEngine:
-    def __init__(self, state_dim=20, action_dim=2, lr=3e-4):
+    def __init__(self, state_dim=19, action_dim=2, lr=3e-4):
         self.state_dim = state_dim
         self.action_dim = action_dim
         self.learning_rate = lr
+
+        # Use shared vectorization utilities
+        self.state_vectorizer = state_vectorizer
+        self.action_vectorizer = action_vectorizer
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         logger.info(f"Using device: {self.device}")
@@ -71,6 +76,11 @@ class RLEngine:
         self.gamma = 0.99  # Discount factor
         self.epsilon = 0.2  # PPO clipping parameter
         self.entropy_coef = 0.01  # Entropy coefficient
+
+        # PPO-specific: Store old policy for comparison
+        self.old_policy_network = PolicyNetwork(state_dim, action_dim).to(self.device)
+        self.old_policy_network.load_state_dict(self.policy_network.state_dict())
+        self.old_policy_network.eval()  # Set to evaluation mode
 
         # Training metrics
         self.training_losses = []
@@ -155,8 +165,8 @@ class RLEngine:
 
         return action, value.squeeze()
 
-    def train(self) -> float:
-        """Train the model using experiences from buffer"""
+    def train(self, ppo_epochs=4) -> float:
+        """Train the model using experiences from buffer with PPO multiple epochs"""
         if len(self.experience_buffer) < self.batch_size:
             return None
 
@@ -171,12 +181,14 @@ class RLEngine:
         dones = []
 
         for exp in batch:
-            # Convert state dict to numpy array
-            state_vec = self._state_dict_to_vector(exp["state"])
-            next_state_vec = self._state_dict_to_vector(exp["next_state"])
+            # Convert state dict to numpy array using shared vectorizer
+            state_vec = self.state_vectorizer.state_dict_to_vector(exp["state"])
+            next_state_vec = self.state_vectorizer.state_dict_to_vector(
+                exp["next_state"]
+            )
 
             states.append(state_vec)
-            actions.append(self._action_dict_to_vector(exp["action"]))
+            actions.append(self.action_vectorizer.action_dict_to_vector(exp["action"]))
             rewards.append(exp["reward"])
             next_states.append(next_state_vec)
             dones.append(exp["done"])
@@ -188,52 +200,78 @@ class RLEngine:
         next_states = torch.FloatTensor(np.array(next_states)).to(self.device)
         dones = torch.FloatTensor(dones).to(self.device)
 
-        # Compute returns
+        # Compute returns and advantages
         with torch.no_grad():
             _, next_values = self.policy_network(next_states)
             returns = rewards + self.gamma * next_values.squeeze() * (1 - dones)
+            _, current_values = self.policy_network(states)
+            advantages = returns - current_values.squeeze()
 
-        # Get current values and policies
-        current_policies, current_values = self.policy_network(states)
+        total_epoch_loss = 0
 
-        # Compute advantages
-        advantages = returns - current_values.squeeze()
+        # PPO: Update policy multiple epochs on same data
+        for epoch in range(ppo_epochs):
+            # PPO Policy Update
+            policy_loss = self._compute_policy_loss(states, actions, advantages)
 
-        # PPO Policy Update
-        policy_loss = self._compute_policy_loss(current_policies, actions, advantages)
+            # Value Update
+            _, current_values = self.policy_network(states)
+            value_loss = nn.MSELoss()(current_values.squeeze(), returns)
 
-        # Value Update
-        value_loss = nn.MSELoss()(current_values.squeeze(), returns)
+            # Update policy network
+            self.policy_optimizer.zero_grad()
+            policy_loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.policy_network.parameters(), 0.5)
+            self.policy_optimizer.step()
 
-        # Update policy network
-        self.policy_optimizer.zero_grad()
-        policy_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.policy_network.parameters(), 0.5)
-        self.policy_optimizer.step()
+            # Update value network
+            self.value_optimizer.zero_grad()
+            value_loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.value_network.parameters(), 0.5)
+            self.value_optimizer.step()
 
-        # Update value network
-        self.value_optimizer.zero_grad()
-        value_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.value_network.parameters(), 0.5)
-        self.value_optimizer.step()
+            total_epoch_loss += policy_loss.item() + value_loss.item()
 
-        total_loss = policy_loss.item() + value_loss.item()
-        self.training_losses.append(total_loss)
+        # Update old policy network
+        self.update_old_policy()
+
+        avg_loss = total_epoch_loss / ppo_epochs
+        self.training_losses.append(avg_loss)
 
         logger.info(
             f"Training step - Policy Loss: {policy_loss.item():.4f}, Value Loss: {value_loss.item():.4f}"
         )
 
-        return total_loss
+        return avg_loss
 
-    def _compute_policy_loss(self, policies, actions, advantages):
+    def update_old_policy(self):
+        """Update old policy network to match current policy network"""
+        self.old_policy_network.load_state_dict(self.policy_network.state_dict())
+        self.old_policy_network.eval()
+
+    def _compute_policy_loss(self, states, actions, advantages):
         """Compute PPO policy loss"""
-        # Get old policy (for comparison)
-        with torch.no_grad():
-            old_policies, _ = self.policy_network(torch.zeros_like(actions))
+        # Get current policies from the main network
+        current_policies, _ = self.policy_network(states)
 
-        # Compute policy ratio
-        ratio = policies / (old_policies + 1e-8)
+        # Get old policies from the stored old network
+        with torch.no_grad():
+            old_policies, _ = self.old_policy_network(states)
+
+        # Only use the policy head for continuous actions (first action_dim outputs)
+        current_action_probs = current_policies[:, : self.action_dim]
+        old_action_probs = old_policies[:, : self.action_dim]
+
+        # Compute policy ratio using probability distributions for continuous actions
+        # For continuous actions, we use Gaussian distributions
+        current_log_probs = torch.distributions.Normal(
+            current_action_probs, 0.1
+        ).log_prob(actions)
+        old_log_probs = torch.distributions.Normal(old_action_probs, 0.1).log_prob(
+            actions
+        )
+
+        ratio = torch.exp(current_log_probs - old_log_probs)
 
         # Compute surrogate loss
         surrogate1 = ratio * advantages.unsqueeze(-1)
@@ -244,57 +282,10 @@ class RLEngine:
         policy_loss = -torch.min(surrogate1, surrogate2).mean()
 
         # Add entropy bonus
-        entropy = -torch.sum(policies * torch.log(policies + 1e-8), dim=-1).mean()
+        entropy = torch.distributions.Normal(current_action_probs, 0.1).entropy().mean()
         policy_loss -= self.entropy_coef * entropy
 
         return policy_loss
-
-    def _state_dict_to_vector(self, state_dict):
-        """Convert state dictionary to vector"""
-        # This should match the conversion in environment.py
-        state_vector = [
-            state_dict.get("cash_balance", 0)
-            / 500000000,  # Normalize by default capital
-            state_dict.get("total_pnl", 0) / 500000000,
-            state_dict.get("available_margin", 0) / 500000000,
-            len(state_dict.get("positions", [])),
-            state_dict.get("rsi", 50) / 100.0,
-            state_dict.get("macd", 0) / 1.0,
-            state_dict.get("bollinger_position", 0.5),
-            state_dict.get("atr", 0) / 100.0,
-            state_dict.get("volume_ratio", 1.0) / 10.0,
-            state_dict.get("market_volatility", 0),
-            state_dict.get("hour_of_day", 12) / 24.0,
-            state_dict.get("day_of_week", 3) / 7.0,
-            1.0 if state_dict.get("market_session") == "us" else 0.0,
-            1.0 if state_dict.get("market_session") == "asia" else 0.0,
-            1.0 if state_dict.get("market_session") == "europe" else 0.0,
-            1.0 if state_dict.get("strategy_type") == "conservative" else 0.0,
-            1.0 if state_dict.get("strategy_type") == "aggressive" else 0.0,
-            1.0 if state_dict.get("strategy_type") == "balanced" else 0.0,
-            1.0 if state_dict.get("strategy_type") == "trend" else 0.0,
-        ]
-
-        return np.array(state_vector, dtype=np.float32)
-
-    def _action_dict_to_vector(self, action_dict):
-        """Convert action dictionary to vector"""
-        action_type = action_dict.get("type", "HOLD")
-
-        # Convert action type to continuous value
-        if action_type == "HOLD":
-            action_val = 0.0
-        elif action_type == "BUY":
-            action_val = 1.0
-        elif action_type == "SELL":
-            action_val = 2.0
-        else:
-            action_val = 0.0
-
-        # Position size (0.0 to 1.0)
-        position_size = action_dict.get("position_size", 0.5)
-
-        return np.array([action_val, position_size], dtype=np.float32)
 
     def save_model(self, path: str):
         """Save model weights"""
@@ -302,6 +293,7 @@ class RLEngine:
             {
                 "policy_network": self.policy_network.state_dict(),
                 "value_network": self.value_network.state_dict(),
+                "old_policy_network": self.old_policy_network.state_dict(),
                 "policy_optimizer": self.policy_optimizer.state_dict(),
                 "value_optimizer": self.value_optimizer.state_dict(),
                 "training_losses": self.training_losses,
@@ -318,6 +310,14 @@ class RLEngine:
 
         self.policy_network.load_state_dict(checkpoint["policy_network"])
         self.value_network.load_state_dict(checkpoint["value_network"])
+
+        # Load old policy network if available (for backwards compatibility)
+        if "old_policy_network" in checkpoint:
+            self.old_policy_network.load_state_dict(checkpoint["old_policy_network"])
+        else:
+            # For backwards compatibility, copy current policy to old policy
+            self.old_policy_network.load_state_dict(checkpoint["policy_network"])
+
         self.policy_optimizer.load_state_dict(checkpoint["policy_optimizer"])
         self.value_optimizer.load_state_dict(checkpoint["value_optimizer"])
         self.training_losses = checkpoint.get("training_losses", [])
