@@ -78,7 +78,11 @@ class BaseAgent(ABC):
 
     def get_market_session(self):
         """Determine current market session"""
-        hour = datetime.now().hour
+        # Allow testing with custom hour
+        if hasattr(self, "_test_hour"):
+            hour = self._test_hour
+        else:
+            hour = datetime.now().hour
 
         if 9 <= hour <= 16:
             return "us"  # US market hours
