@@ -5,7 +5,10 @@ import numpy as np
 from datetime import datetime, timedelta
 import yfinance as yf
 from typing import Dict, Optional, List, Tuple
-import MetaTrader5 as mt5
+try:
+    import MetaTrader5 as mt5
+except ImportError:
+    mt5 = None
 from copy import deepcopy
 
 class MarketAnalyzer:
