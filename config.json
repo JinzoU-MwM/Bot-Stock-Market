@@ -26,7 +26,7 @@
     "enable_breakout_trading": true,
     "ignore_economic_calendar": true,
     "max_daily_trades": 100,
-    "min_signal_strength": 0.05,
+    "min_signal_strength": 0.1,
     "max_positions_per_symbol": 3,
     "max_total_positions": 10,
     "enable_multi_symbol": true,
@@ -67,18 +67,18 @@
       "BBRI": "BBRI.JK",
       "TLKM": "TLKM.JK"
     },
-    "strategy_profile": "scalping",
+    "strategy_profile": "short_term",
     "stock_strategy": {
       "enable": true,
-      "ema_fast": 5,
-      "ema_slow": 13,
-      "lookback_breakout": 10,
-      "volume_multiplier": 1.0,
-      "atr_period": 7,
-      "atr_multiplier": 1.1,
-      "rsi_period": 7,
-      "rsi_max_buy": 70,
-      "rsi_min_sell": 30
+      "ema_fast": 12,
+      "ema_slow": 34,
+      "lookback_breakout": 20,
+      "volume_multiplier": 1.3,
+      "atr_period": 14,
+      "atr_multiplier": 1.3,
+      "rsi_period": 14,
+      "rsi_max_buy": 65,
+      "rsi_min_sell": 35
     },
     "starting_balance": 0
   },

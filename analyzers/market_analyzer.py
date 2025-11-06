@@ -1,18 +1,42 @@
-# market_analyzer.py - AGGRESSIVE TRADING VERSION
+# market_analyzer.py - AGGRESSIVE TRADING VERSION WITH ML INTEGRATION
 import requests
 import pandas as pd
 import numpy as np
+import sys
+import os
 from datetime import datetime, timedelta
 import yfinance as yf
 from typing import Dict, Optional, List, Tuple
-import MetaTrader5 as mt5
+try:
+    import MetaTrader5 as mt5
+except ImportError:
+    mt5 = None
 from copy import deepcopy
+
+# ML Integration
+try:
+    sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+    from ml_system.core.ml_predictor import MLPredictor
+    ML_AVAILABLE = True
+except ImportError:
+    ML_AVAILABLE = False
+    class MLPredictor:
+        def __init__(self):
+            self.enabled = False
+        def is_enabled(self):
+            return False
+        def predict_signal(self, df, symbol):
+            return None
 
 class MarketAnalyzer:
     def __init__(self, news_api_key: str = None, te_key: str = None):
         self.news_api_key = news_api_key
         self.te_key = te_key
         self.forex_factory_url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+
+        # Initialize ML Predictor
+        self.ml_predictor = MLPredictor()
+        print(f"[INFO] ML Predictor Status: {'ENABLED' if self.ml_predictor.is_enabled() else 'DISABLED'}")
         
     def analyze_market(self, df: pd.DataFrame, symbol: str, config: dict = None) -> Dict:
         """Comprehensive market analysis dengan mode aggressive"""
@@ -33,12 +57,16 @@ class MarketAnalyzer:
         
         strategy_info = self._resolve_strategy_profile(symbol, config)
 
+        # ML Analysis
+        ml_analysis = self._analyze_with_ml(df, symbol)
+
         analysis = {
             'technical': self._analyze_technical(df),
             'patterns': self._detect_candlestick_patterns(df),
             'breakout': self._detect_breakouts(df),
             'support_resistance': self._find_support_resistance(df),
             'scalping': self._scalping_signals(df),
+            'ml': ml_analysis,  # New ML component
             'stock_strategy': {'signal': 'WAIT', 'reasons': []},
             'news': self._analyze_news_simple(symbol, config),
             'calendar': self._get_economic_calendar_light(config),  # Lighter version
@@ -385,8 +413,9 @@ class MarketAnalyzer:
             score -= 1
         
         # 2. Volume spike
-        avg_volume = df['tick_volume'].iloc[-10:-1].mean()
-        last_volume = df['tick_volume'].iloc[-1]
+        volume_col = 'tick_volume' if 'tick_volume' in df.columns else 'volume'
+        avg_volume = df[volume_col].iloc[-10:-1].mean()
+        last_volume = df[volume_col].iloc[-1]
         
         if last_volume > avg_volume * 1.2:
             signals.append("Volume Spike")
@@ -629,11 +658,12 @@ class MarketAnalyzer:
         current_cfg = config.get('current', {})
         min_threshold = current_cfg.get('min_signal_strength', 0.1)
         weights = {
-            'technical': 0.3,
-            'patterns': 0.25,
-            'breakout': 0.2,
-            'support_resistance': 0.15,
-            'scalping': 0.1,
+            'technical': 0.25,
+            'patterns': 0.20,
+            'breakout': 0.15,
+            'support_resistance': 0.10,
+            'scalping': 0.10,
+            'ml': 0.20,  # New ML weight
             'stock_strategy': 0.25,
             'news': 0.1
         }
@@ -688,6 +718,26 @@ class MarketAnalyzer:
         elif scalp.get('score', 0) <= -2:
             strength -= weights.get('scalping', 0)
             reasons.append(f"❌ Scalping signals")
+
+        # ML: 20%
+        ml = analysis.get('ml', {})
+        if ml.get('available', False):
+            ml_confidence = ml.get('confidence', 0)
+            ml_signal = ml.get('signal', 'WAIT')
+
+            # Apply ML signal with confidence weighting
+            if ml_signal == 'BUY':
+                ml_weight = weights.get('ml', 0) * ml_confidence
+                strength += ml_weight
+                reasons.append(f"[ML] BUY ({ml_confidence:.3f} confidence)")
+            elif ml_signal == 'SELL':
+                ml_weight = weights.get('ml', 0) * ml_confidence
+                strength -= ml_weight
+                reasons.append(f"[ML] SELL ({ml_confidence:.3f} confidence)")
+            else:
+                reasons.append(f"[ML] WAIT ({ml_confidence:.3f} confidence)")
+        else:
+            reasons.append(f"[ML] {ml.get('reason', 'Unavailable')}")
 
         instrument_type = config.get('current', {}).get('instrument_type', '').lower()
         stock_cfg = config.get('current', {}).get('stock_strategy', {})
@@ -789,3 +839,42 @@ class MarketAnalyzer:
         true_range = ranges.max(axis=1)
         atr = true_range.rolling(period).mean().iloc[-1]
         return atr if not pd.isna(atr) else 0.0001
+
+    # ============== ML INTEGRATION METHODS ==============
+
+    def _analyze_with_ml(self, df: pd.DataFrame, symbol: str) -> Dict:
+        """Analyze using ML predictor"""
+        if not self.ml_predictor.is_enabled():
+            return {
+                'signal': 'WAIT',
+                'confidence': 0.0,
+                'available': False,
+                'reason': 'ML model not available'
+            }
+
+        try:
+            ml_prediction = self.ml_predictor.predict_signal(df, symbol)
+
+            if ml_prediction and ml_prediction.get('success', False):
+                return {
+                    'signal': ml_prediction['signal'],
+                    'confidence': ml_prediction['confidence'],
+                    'available': True,
+                    'reason': f'ML prediction with {ml_prediction["confidence"]:.3f} confidence',
+                    'current_price': ml_prediction.get('current_price', 0),
+                    'probabilities': ml_prediction.get('probabilities', {})
+                }
+            else:
+                return {
+                    'signal': 'WAIT',
+                    'confidence': 0.0,
+                    'available': False,
+                    'reason': 'ML prediction failed'
+                }
+        except Exception as e:
+            return {
+                'signal': 'WAIT',
+                'confidence': 0.0,
+                'available': False,
+                'reason': f'ML error: {str(e)}'
+            }
